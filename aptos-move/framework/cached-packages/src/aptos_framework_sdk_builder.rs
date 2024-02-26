@@ -430,10 +430,22 @@ pub enum EntryFunctionCall {
         payload: Vec<u8>,
     },
 
+    /// Create a multisig transaction with eviction if the transaction queue is full.
+    MultisigAccountCreateTransactionWithEviction {
+        multisig_account: AccountAddress,
+        payload: Vec<u8>,
+    },
+
     /// Create a multisig transaction with a transaction hash instead of the full payload.
     /// This means the payload will be stored off chain for gas saving. Later, during execution, the executor will need
     /// to provide the full payload, which will be validated against the hash stored on-chain.
     MultisigAccountCreateTransactionWithHash {
+        multisig_account: AccountAddress,
+        payload_hash: Vec<u8>,
+    },
+
+    /// Create a multisig transaction with a transaction hash while evicting the next transaction if the queue is full.
+    MultisigAccountCreateTransactionWithHashWithEviction {
         multisig_account: AccountAddress,
         payload_hash: Vec<u8>,
     },
@@ -498,9 +510,20 @@ pub enum EntryFunctionCall {
         metadata_values: Vec<Vec<u8>>,
     },
 
+    /// Remove all pending transactions if they have sufficient owner rejections.
+    MultisigAccountExecuteAllRejectedTransactions {
+        multisig_account: AccountAddress,
+    },
+
     /// Remove the next transaction if it has sufficient owner rejections.
     MultisigAccountExecuteRejectedTransaction {
         multisig_account: AccountAddress,
+    },
+
+    /// Remove the next transactions until the final_sequence_number if they have sufficient owner rejections.
+    MultisigAccountExecuteRejectedTransactions {
+        multisig_account: AccountAddress,
+        final_sequence_number: u64,
     },
 
     /// Reject a multisig transaction.
@@ -566,7 +589,29 @@ pub enum EntryFunctionCall {
         new_num_signatures_required: u64,
     },
 
+    /// Generic function that can be used to either approve or reject all pending transactions.
+    MultisigAccountVoteAllTransactions {
+        multisig_account: AccountAddress,
+        approved: bool,
+    },
+
     /// Generic function that can be used to either approve or reject a multisig transaction
+    MultisigAccountVoteTransaction {
+        multisig_account: AccountAddress,
+        sequence_number: u64,
+        approved: bool,
+    },
+
+    /// Generic function that can be used to either approve or reject a batch of transactions within a specified range.
+    MultisigAccountVoteTransactions {
+        multisig_account: AccountAddress,
+        starting_sequence_number: u64,
+        final_sequence_number: u64,
+        approved: bool,
+    },
+
+    /// Retained for backward compatibility: the function with the typographical error in its name
+    /// will continue to be an accessible entry point.
     MultisigAccountVoteTransanction {
         multisig_account: AccountAddress,
         sequence_number: u64,
@@ -1150,10 +1195,21 @@ impl EntryFunctionCall {
                 multisig_account,
                 payload,
             } => multisig_account_create_transaction(multisig_account, payload),
+            MultisigAccountCreateTransactionWithEviction {
+                multisig_account,
+                payload,
+            } => multisig_account_create_transaction_with_eviction(multisig_account, payload),
             MultisigAccountCreateTransactionWithHash {
                 multisig_account,
                 payload_hash,
             } => multisig_account_create_transaction_with_hash(multisig_account, payload_hash),
+            MultisigAccountCreateTransactionWithHashWithEviction {
+                multisig_account,
+                payload_hash,
+            } => multisig_account_create_transaction_with_hash_with_eviction(
+                multisig_account,
+                payload_hash,
+            ),
             MultisigAccountCreateWithExistingAccount {
                 multisig_address,
                 owners,
@@ -1214,9 +1270,19 @@ impl EntryFunctionCall {
                 metadata_keys,
                 metadata_values,
             ),
+            MultisigAccountExecuteAllRejectedTransactions { multisig_account } => {
+                multisig_account_execute_all_rejected_transactions(multisig_account)
+            },
             MultisigAccountExecuteRejectedTransaction { multisig_account } => {
                 multisig_account_execute_rejected_transaction(multisig_account)
             },
+            MultisigAccountExecuteRejectedTransactions {
+                multisig_account,
+                final_sequence_number,
+            } => multisig_account_execute_rejected_transactions(
+                multisig_account,
+                final_sequence_number,
+            ),
             MultisigAccountRejectTransaction {
                 multisig_account,
                 sequence_number,
@@ -1250,6 +1316,26 @@ impl EntryFunctionCall {
             MultisigAccountUpdateSignaturesRequired {
                 new_num_signatures_required,
             } => multisig_account_update_signatures_required(new_num_signatures_required),
+            MultisigAccountVoteAllTransactions {
+                multisig_account,
+                approved,
+            } => multisig_account_vote_all_transactions(multisig_account, approved),
+            MultisigAccountVoteTransaction {
+                multisig_account,
+                sequence_number,
+                approved,
+            } => multisig_account_vote_transaction(multisig_account, sequence_number, approved),
+            MultisigAccountVoteTransactions {
+                multisig_account,
+                starting_sequence_number,
+                final_sequence_number,
+                approved,
+            } => multisig_account_vote_transactions(
+                multisig_account,
+                starting_sequence_number,
+                final_sequence_number,
+                approved,
+            ),
             MultisigAccountVoteTransanction {
                 multisig_account,
                 sequence_number,
@@ -2581,6 +2667,28 @@ pub fn multisig_account_create_transaction(
     ))
 }
 
+/// Create a multisig transaction with eviction if the transaction queue is full.
+pub fn multisig_account_create_transaction_with_eviction(
+    multisig_account: AccountAddress,
+    payload: Vec<u8>,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("multisig_account").to_owned(),
+        ),
+        ident_str!("create_transaction_with_eviction").to_owned(),
+        vec![],
+        vec![
+            bcs::to_bytes(&multisig_account).unwrap(),
+            bcs::to_bytes(&payload).unwrap(),
+        ],
+    ))
+}
+
 /// Create a multisig transaction with a transaction hash instead of the full payload.
 /// This means the payload will be stored off chain for gas saving. Later, during execution, the executor will need
 /// to provide the full payload, which will be validated against the hash stored on-chain.
@@ -2597,6 +2705,28 @@ pub fn multisig_account_create_transaction_with_hash(
             ident_str!("multisig_account").to_owned(),
         ),
         ident_str!("create_transaction_with_hash").to_owned(),
+        vec![],
+        vec![
+            bcs::to_bytes(&multisig_account).unwrap(),
+            bcs::to_bytes(&payload_hash).unwrap(),
+        ],
+    ))
+}
+
+/// Create a multisig transaction with a transaction hash while evicting the next transaction if the queue is full.
+pub fn multisig_account_create_transaction_with_hash_with_eviction(
+    multisig_account: AccountAddress,
+    payload_hash: Vec<u8>,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("multisig_account").to_owned(),
+        ),
+        ident_str!("create_transaction_with_hash_with_eviction").to_owned(),
         vec![],
         vec![
             bcs::to_bytes(&multisig_account).unwrap(),
@@ -2745,6 +2875,24 @@ pub fn multisig_account_create_with_owners_then_remove_bootstrapper(
     ))
 }
 
+/// Remove all pending transactions if they have sufficient owner rejections.
+pub fn multisig_account_execute_all_rejected_transactions(
+    multisig_account: AccountAddress,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("multisig_account").to_owned(),
+        ),
+        ident_str!("execute_all_rejected_transactions").to_owned(),
+        vec![],
+        vec![bcs::to_bytes(&multisig_account).unwrap()],
+    ))
+}
+
 /// Remove the next transaction if it has sufficient owner rejections.
 pub fn multisig_account_execute_rejected_transaction(
     multisig_account: AccountAddress,
@@ -2760,6 +2908,28 @@ pub fn multisig_account_execute_rejected_transaction(
         ident_str!("execute_rejected_transaction").to_owned(),
         vec![],
         vec![bcs::to_bytes(&multisig_account).unwrap()],
+    ))
+}
+
+/// Remove the next transactions until the final_sequence_number if they have sufficient owner rejections.
+pub fn multisig_account_execute_rejected_transactions(
+    multisig_account: AccountAddress,
+    final_sequence_number: u64,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("multisig_account").to_owned(),
+        ),
+        ident_str!("execute_rejected_transactions").to_owned(),
+        vec![],
+        vec![
+            bcs::to_bytes(&multisig_account).unwrap(),
+            bcs::to_bytes(&final_sequence_number).unwrap(),
+        ],
     ))
 }
 
@@ -2942,7 +3112,80 @@ pub fn multisig_account_update_signatures_required(
     ))
 }
 
+/// Generic function that can be used to either approve or reject all pending transactions.
+pub fn multisig_account_vote_all_transactions(
+    multisig_account: AccountAddress,
+    approved: bool,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("multisig_account").to_owned(),
+        ),
+        ident_str!("vote_all_transactions").to_owned(),
+        vec![],
+        vec![
+            bcs::to_bytes(&multisig_account).unwrap(),
+            bcs::to_bytes(&approved).unwrap(),
+        ],
+    ))
+}
+
 /// Generic function that can be used to either approve or reject a multisig transaction
+pub fn multisig_account_vote_transaction(
+    multisig_account: AccountAddress,
+    sequence_number: u64,
+    approved: bool,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("multisig_account").to_owned(),
+        ),
+        ident_str!("vote_transaction").to_owned(),
+        vec![],
+        vec![
+            bcs::to_bytes(&multisig_account).unwrap(),
+            bcs::to_bytes(&sequence_number).unwrap(),
+            bcs::to_bytes(&approved).unwrap(),
+        ],
+    ))
+}
+
+/// Generic function that can be used to either approve or reject a batch of transactions within a specified range.
+pub fn multisig_account_vote_transactions(
+    multisig_account: AccountAddress,
+    starting_sequence_number: u64,
+    final_sequence_number: u64,
+    approved: bool,
+) -> TransactionPayload {
+    TransactionPayload::EntryFunction(EntryFunction::new(
+        ModuleId::new(
+            AccountAddress::new([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1,
+            ]),
+            ident_str!("multisig_account").to_owned(),
+        ),
+        ident_str!("vote_transactions").to_owned(),
+        vec![],
+        vec![
+            bcs::to_bytes(&multisig_account).unwrap(),
+            bcs::to_bytes(&starting_sequence_number).unwrap(),
+            bcs::to_bytes(&final_sequence_number).unwrap(),
+            bcs::to_bytes(&approved).unwrap(),
+        ],
+    ))
+}
+
+/// Retained for backward compatibility: the function with the typographical error in its name
+/// will continue to be an accessible entry point.
 pub fn multisig_account_vote_transanction(
     multisig_account: AccountAddress,
     sequence_number: u64,
@@ -4725,12 +4968,42 @@ mod decoder {
         }
     }
 
+    pub fn multisig_account_create_transaction_with_eviction(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(
+                EntryFunctionCall::MultisigAccountCreateTransactionWithEviction {
+                    multisig_account: bcs::from_bytes(script.args().get(0)?).ok()?,
+                    payload: bcs::from_bytes(script.args().get(1)?).ok()?,
+                },
+            )
+        } else {
+            None
+        }
+    }
+
     pub fn multisig_account_create_transaction_with_hash(
         payload: &TransactionPayload,
     ) -> Option<EntryFunctionCall> {
         if let TransactionPayload::EntryFunction(script) = payload {
             Some(
                 EntryFunctionCall::MultisigAccountCreateTransactionWithHash {
+                    multisig_account: bcs::from_bytes(script.args().get(0)?).ok()?,
+                    payload_hash: bcs::from_bytes(script.args().get(1)?).ok()?,
+                },
+            )
+        } else {
+            None
+        }
+    }
+
+    pub fn multisig_account_create_transaction_with_hash_with_eviction(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(
+                EntryFunctionCall::MultisigAccountCreateTransactionWithHashWithEviction {
                     multisig_account: bcs::from_bytes(script.args().get(0)?).ok()?,
                     payload_hash: bcs::from_bytes(script.args().get(1)?).ok()?,
                 },
@@ -4816,6 +5089,20 @@ mod decoder {
         }
     }
 
+    pub fn multisig_account_execute_all_rejected_transactions(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(
+                EntryFunctionCall::MultisigAccountExecuteAllRejectedTransactions {
+                    multisig_account: bcs::from_bytes(script.args().get(0)?).ok()?,
+                },
+            )
+        } else {
+            None
+        }
+    }
+
     pub fn multisig_account_execute_rejected_transaction(
         payload: &TransactionPayload,
     ) -> Option<EntryFunctionCall> {
@@ -4823,6 +5110,21 @@ mod decoder {
             Some(
                 EntryFunctionCall::MultisigAccountExecuteRejectedTransaction {
                     multisig_account: bcs::from_bytes(script.args().get(0)?).ok()?,
+                },
+            )
+        } else {
+            None
+        }
+    }
+
+    pub fn multisig_account_execute_rejected_transactions(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(
+                EntryFunctionCall::MultisigAccountExecuteRejectedTransactions {
+                    multisig_account: bcs::from_bytes(script.args().get(0)?).ok()?,
+                    final_sequence_number: bcs::from_bytes(script.args().get(1)?).ok()?,
                 },
             )
         } else {
@@ -4924,6 +5226,48 @@ mod decoder {
         if let TransactionPayload::EntryFunction(script) = payload {
             Some(EntryFunctionCall::MultisigAccountUpdateSignaturesRequired {
                 new_num_signatures_required: bcs::from_bytes(script.args().get(0)?).ok()?,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn multisig_account_vote_all_transactions(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(EntryFunctionCall::MultisigAccountVoteAllTransactions {
+                multisig_account: bcs::from_bytes(script.args().get(0)?).ok()?,
+                approved: bcs::from_bytes(script.args().get(1)?).ok()?,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn multisig_account_vote_transaction(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(EntryFunctionCall::MultisigAccountVoteTransaction {
+                multisig_account: bcs::from_bytes(script.args().get(0)?).ok()?,
+                sequence_number: bcs::from_bytes(script.args().get(1)?).ok()?,
+                approved: bcs::from_bytes(script.args().get(2)?).ok()?,
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn multisig_account_vote_transactions(
+        payload: &TransactionPayload,
+    ) -> Option<EntryFunctionCall> {
+        if let TransactionPayload::EntryFunction(script) = payload {
+            Some(EntryFunctionCall::MultisigAccountVoteTransactions {
+                multisig_account: bcs::from_bytes(script.args().get(0)?).ok()?,
+                starting_sequence_number: bcs::from_bytes(script.args().get(1)?).ok()?,
+                final_sequence_number: bcs::from_bytes(script.args().get(2)?).ok()?,
+                approved: bcs::from_bytes(script.args().get(3)?).ok()?,
             })
         } else {
             None
@@ -5832,8 +6176,16 @@ static SCRIPT_FUNCTION_DECODER_MAP: once_cell::sync::Lazy<EntryFunctionDecoderMa
             Box::new(decoder::multisig_account_create_transaction),
         );
         map.insert(
+            "multisig_account_create_transaction_with_eviction".to_string(),
+            Box::new(decoder::multisig_account_create_transaction_with_eviction),
+        );
+        map.insert(
             "multisig_account_create_transaction_with_hash".to_string(),
             Box::new(decoder::multisig_account_create_transaction_with_hash),
+        );
+        map.insert(
+            "multisig_account_create_transaction_with_hash_with_eviction".to_string(),
+            Box::new(decoder::multisig_account_create_transaction_with_hash_with_eviction),
         );
         map.insert(
             "multisig_account_create_with_existing_account".to_string(),
@@ -5852,8 +6204,16 @@ static SCRIPT_FUNCTION_DECODER_MAP: once_cell::sync::Lazy<EntryFunctionDecoderMa
             Box::new(decoder::multisig_account_create_with_owners_then_remove_bootstrapper),
         );
         map.insert(
+            "multisig_account_execute_all_rejected_transactions".to_string(),
+            Box::new(decoder::multisig_account_execute_all_rejected_transactions),
+        );
+        map.insert(
             "multisig_account_execute_rejected_transaction".to_string(),
             Box::new(decoder::multisig_account_execute_rejected_transaction),
+        );
+        map.insert(
+            "multisig_account_execute_rejected_transactions".to_string(),
+            Box::new(decoder::multisig_account_execute_rejected_transactions),
         );
         map.insert(
             "multisig_account_reject_transaction".to_string(),
@@ -5886,6 +6246,18 @@ static SCRIPT_FUNCTION_DECODER_MAP: once_cell::sync::Lazy<EntryFunctionDecoderMa
         map.insert(
             "multisig_account_update_signatures_required".to_string(),
             Box::new(decoder::multisig_account_update_signatures_required),
+        );
+        map.insert(
+            "multisig_account_vote_all_transactions".to_string(),
+            Box::new(decoder::multisig_account_vote_all_transactions),
+        );
+        map.insert(
+            "multisig_account_vote_transaction".to_string(),
+            Box::new(decoder::multisig_account_vote_transaction),
+        );
+        map.insert(
+            "multisig_account_vote_transactions".to_string(),
+            Box::new(decoder::multisig_account_vote_transactions),
         );
         map.insert(
             "multisig_account_vote_transanction".to_string(),
