@@ -12,8 +12,10 @@ use tokio::sync::RwLock;
 
 // Internal lookup retry interval for in-memory cache.
 const IN_MEMORY_CACHE_LOOKUP_RETRY_INTERVAL_MS: u64 = 10;
-// Max cache size in bytes: 1 GB.
-const MAX_IN_MEMORY_CACHE_CAPACITY_IN_BYTES: u64 = 1_000_000_000;
+// Max cache size in bytes: 5 GB.
+const MAX_IN_MEMORY_CACHE_CAPACITY_IN_BYTES: u64 = 5_000_000_000;
+// Max cache entry TTL: 30 seconds.
+const MAX_IN_MEMORY_CACHE_ENTRY_TTL: u64 = 30;
 // Warm-up cache entries. Pre-fetch the cache entries to warm up the cache.
 const WARM_UP_CACHE_ENTRIES: u64 = 20_000;
 const MAX_REDIS_FETCH_BATCH_SIZE: usize = 500;
@@ -38,10 +40,16 @@ impl InMemoryCache {
         let cache = Cache::builder()
             .weigher(|_k, v: &Arc<Transaction>| v.encoded_len() as u32)
             .max_capacity(MAX_IN_MEMORY_CACHE_CAPACITY_IN_BYTES)
+            .time_to_live(std::time::Duration::from_secs(
+                MAX_IN_MEMORY_CACHE_ENTRY_TTL,
+            ))
             .build();
         let in_memory_latest_version =
             warm_up_the_cache(conn.clone(), cache.clone(), storage_format).await?;
-
+        tracing::info!(
+            "In-memory cache is warmed up to version {}",
+            in_memory_latest_version
+        );
         let cancellation_token = tokio_util::sync::CancellationToken::new();
         let cancellation_token_clone = cancellation_token.clone();
         let latest_version = Arc::new(RwLock::new(in_memory_latest_version));
@@ -53,6 +61,7 @@ impl InMemoryCache {
             cancellation_token_clone,
         )
         .await;
+        tracing::info!("In-memory cache is created");
         Ok(Self {
             cache,
             latest_version,
@@ -66,7 +75,7 @@ impl InMemoryCache {
     // Otherwise, empty.
     pub async fn get_transactions(&self, starting_version: u64) -> Vec<Transaction> {
         let versions_to_fetch = loop {
-            let latest_version = *self.latest_version.read().await;
+            let latest_version = { *self.latest_version.read().await };
             if starting_version >= latest_version {
                 tokio::time::sleep(std::time::Duration::from_millis(
                     IN_MEMORY_CACHE_LOOKUP_RETRY_INTERVAL_MS,
@@ -74,7 +83,12 @@ impl InMemoryCache {
                 .await;
                 continue;
             }
-            break (starting_version..latest_version).collect::<Vec<u64>>();
+            // This is to avoid fetching too many transactions at once.
+            let ending_version = std::cmp::min(
+                latest_version,
+                starting_version + MAX_REDIS_FETCH_BATCH_SIZE as u64,
+            );
+            break (starting_version..ending_version).collect::<Vec<u64>>();
         };
         let keys = versions_to_fetch
             .into_iter()
@@ -107,7 +121,7 @@ where
     C: redis::aio::ConnectionLike + Send + Sync + Clone + 'static,
 {
     let mut conn = conn.clone();
-    let latest_version = get_config_by_key(&mut conn, "latest_versions")
+    let latest_version = get_config_by_key(&mut conn, "latest_version")
         .await
         .context("Failed to fetch the latest version from redis")?
         .context("Latest version doesn't exist in Redis")?;
@@ -138,7 +152,7 @@ async fn create_update_task<C>(
             IN_MEMORY_CACHE_LOOKUP_RETRY_INTERVAL_MS,
         ));
         loop {
-            let current_latest_version = get_config_by_key(&mut conn, "latest_versions")
+            let current_latest_version = get_config_by_key(&mut conn, "latest_version")
                 .await
                 .context("Failed to fetch the latest version from redis")
                 .unwrap()
@@ -156,18 +170,28 @@ async fn create_update_task<C>(
                     },
                 }
             }
-
-            let versions_to_fetch = (in_cache_latest_version..current_latest_version).collect();
+            let end_version = std::cmp::min(
+                current_latest_version,
+                in_cache_latest_version + 10 * MAX_REDIS_FETCH_BATCH_SIZE as u64,
+            );
+            let versions_to_fetch = (in_cache_latest_version..end_version).collect();
             let transactions = batch_get_transactions(&mut conn, versions_to_fetch, storage_format)
                 .await
                 .unwrap();
+            // Ensure that transactions are ordered by version.
+            for (ind, transaction) in transactions.iter().enumerate() {
+                if transaction.version != in_cache_latest_version + ind as u64 {
+                    panic!("Transactions are not ordered by version");
+                }
+            }
+
             for transaction in transactions {
                 cache.insert(
                     CacheEntry::build_key(transaction.version, storage_format),
                     Arc::new(transaction),
                 );
             }
-            *latest_version.write().await = current_latest_version;
+            *latest_version.write().await = end_version;
         }
     });
 }

@@ -222,9 +222,25 @@ async fn get_data_with_tasks(
     cache_storage_format: StorageFormat,
     in_memory_cache: Arc<InMemoryCache>,
 ) -> DataFetchSubTaskResult {
+    let start_time = Instant::now();
     let in_memory_transactions = in_memory_cache.get_transactions(start_version).await;
     if !in_memory_transactions.is_empty() {
-        return DataFetchSubTaskResult::Success(in_memory_transactions);
+        log_grpc_step(
+            SERVICE_TYPE,
+            IndexerGrpcStep::DataServiceFetchingDataFromInMemoryCache,
+            Some(start_version as i64),
+            Some(in_memory_transactions.last().as_ref().unwrap().version as i64),
+            None,
+            None,
+            Some(start_time.elapsed().as_secs_f64()),
+            None,
+            Some(in_memory_transactions.len() as i64),
+            Some(&request_metadata),
+        );
+        return DataFetchSubTaskResult::BatchSuccess(chunk_transactions(
+            in_memory_transactions,
+            MESSAGE_SIZE_LIMIT,
+        ));
     }
     let cache_coverage_status = cache_operator
         .check_cache_coverage_status(start_version)
