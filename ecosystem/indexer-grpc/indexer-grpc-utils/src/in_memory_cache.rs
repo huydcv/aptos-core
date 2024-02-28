@@ -85,7 +85,8 @@ impl InMemoryCache {
     // If requested version is not in the cache, it blocks until the version is available.
     // Otherwise, empty.
     pub async fn get_transactions(&self, starting_version: u64) -> Vec<Transaction> {
-        let versions_to_fetch = loop {
+        let start_time = std::time::Instant::now();
+        let (versions_to_fetch, in_memory_latest_version) = loop {
             let latest_version = { *self.latest_version.read().await };
             if starting_version >= latest_version {
                 tokio::time::sleep(std::time::Duration::from_millis(
@@ -99,7 +100,10 @@ impl InMemoryCache {
                 latest_version,
                 starting_version + MAX_REDIS_FETCH_BATCH_SIZE as u64,
             );
-            break (starting_version..ending_version).collect::<Vec<u64>>();
+            break (
+                (starting_version..ending_version).collect::<Vec<u64>>(),
+                latest_version,
+            );
         };
         let keys = versions_to_fetch
             .into_iter()
@@ -114,6 +118,14 @@ impl InMemoryCache {
                 break;
             }
         }
+
+        tracing::info!(
+            transactions_count = arc_transactions.len(),
+            starting_version,
+            in_memory_latest_version,
+            duration_in_seconds = start_time.elapsed().as_secs_f64(),
+            "In-memory cache lookup",
+        );
         // Actual clone.
         arc_transactions
             .into_iter()
@@ -181,6 +193,7 @@ async fn create_update_task<C>(
                     },
                 }
             }
+            let start_time = std::time::Instant::now();
             let end_version = std::cmp::min(
                 current_latest_version,
                 in_cache_latest_version + 10 * MAX_REDIS_FETCH_BATCH_SIZE as u64,
@@ -190,6 +203,7 @@ async fn create_update_task<C>(
                 .await
                 .unwrap();
             // Ensure that transactions are ordered by version.
+            let cache_processing_start_time = std::time::Instant::now();
             for (ind, transaction) in transactions.iter().enumerate() {
                 if transaction.version != in_cache_latest_version + ind as u64 {
                     panic!("Transactions are not ordered by version");
@@ -202,6 +216,16 @@ async fn create_update_task<C>(
                     Arc::new(transaction),
                 );
             }
+            let processing_duration = start_time.elapsed().as_secs_f64();
+            tracing::info!(
+                redis_latest_version = current_latest_version,
+                in_memory_latest_version = in_cache_latest_version,
+                new_in_memory_latest_version = end_version,
+                processing_duration,
+                cache_processing_duration = cache_processing_start_time.elapsed().as_secs_f64(),
+                "In-memory cache is updated"
+            );
+
             *latest_version.write().await = end_version;
         }
     });
