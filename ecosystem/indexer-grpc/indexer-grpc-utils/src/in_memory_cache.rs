@@ -4,8 +4,9 @@ use crate::compression_util::{CacheEntry, StorageFormat};
 use anyhow::Context;
 use aptos_protos::transaction::v1::Transaction;
 use itertools::Itertools;
-use mini_moka::sync::Cache;
 use prost::Message;
+// use mini_moka::sync::Cache;
+use quick_cache::{sync::Cache, Weighter};
 use redis::AsyncCommands;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -14,8 +15,10 @@ use tokio::sync::RwLock;
 const IN_MEMORY_CACHE_LOOKUP_RETRY_INTERVAL_MS: u64 = 10;
 // Max cache size in bytes: 5 GB.
 const MAX_IN_MEMORY_CACHE_CAPACITY_IN_BYTES: u64 = 5_000_000_000;
+// Estimated cache count capacity.
+const MAX_IN_MEMORY_CACHE_COUNT_CAPACITY: usize = 250_000;
 // Max cache entry TTL: 30 seconds.
-const MAX_IN_MEMORY_CACHE_ENTRY_TTL: u64 = 30;
+// const MAX_IN_MEMORY_CACHE_ENTRY_TTL: u64 = 30;
 // Warm-up cache entries. Pre-fetch the cache entries to warm up the cache.
 const WARM_UP_CACHE_ENTRIES: u64 = 20_000;
 const MAX_REDIS_FETCH_BATCH_SIZE: usize = 500;
@@ -23,10 +26,19 @@ const MAX_REDIS_FETCH_BATCH_SIZE: usize = 500;
 /// InMemoryCache is a simple in-memory cache that stores the protobuf Transaction.
 pub struct InMemoryCache {
     /// Cache maps the cache key to the deserialized Transaction.
-    cache: Cache<String, Arc<Transaction>>,
+    cache: Arc<Cache<String, Arc<Transaction>, ProtoWeighter>>,
     latest_version: Arc<RwLock<u64>>,
     storage_format: StorageFormat,
     _cancellation_token_drop_guard: tokio_util::sync::DropGuard,
+}
+
+#[derive(Clone)]
+struct ProtoWeighter;
+
+impl Weighter<String, Arc<Transaction>> for ProtoWeighter {
+    fn weight(&self, _key: &String, value: &Arc<Transaction>) -> u32 {
+        value.encoded_len().clamp(1, u32::MAX as usize) as u32
+    }
 }
 
 impl InMemoryCache {
@@ -37,15 +49,14 @@ impl InMemoryCache {
     where
         C: redis::aio::ConnectionLike + Send + Sync + Clone + 'static,
     {
-        let cache = Cache::builder()
-            .weigher(|_k, v: &Arc<Transaction>| v.encoded_len() as u32)
-            .max_capacity(MAX_IN_MEMORY_CACHE_CAPACITY_IN_BYTES)
-            .time_to_live(std::time::Duration::from_secs(
-                MAX_IN_MEMORY_CACHE_ENTRY_TTL,
-            ))
-            .build();
+        let cache = Cache::with_weighter(
+            MAX_IN_MEMORY_CACHE_COUNT_CAPACITY,
+            MAX_IN_MEMORY_CACHE_CAPACITY_IN_BYTES,
+            ProtoWeighter,
+        );
+        let cache_arc = Arc::new(cache);
         let in_memory_latest_version =
-            warm_up_the_cache(conn.clone(), cache.clone(), storage_format).await?;
+            warm_up_the_cache(conn.clone(), cache_arc.clone(), storage_format).await?;
         tracing::info!(
             "In-memory cache is warmed up to version {}",
             in_memory_latest_version
@@ -55,7 +66,7 @@ impl InMemoryCache {
         let latest_version = Arc::new(RwLock::new(in_memory_latest_version));
         create_update_task(
             conn,
-            cache.clone(),
+            cache_arc.clone(),
             latest_version.clone(),
             storage_format,
             cancellation_token_clone,
@@ -63,7 +74,7 @@ impl InMemoryCache {
         .await;
         tracing::info!("In-memory cache is created");
         Ok(Self {
-            cache,
+            cache: cache_arc,
             latest_version,
             _cancellation_token_drop_guard: cancellation_token.drop_guard(),
             storage_format,
@@ -114,7 +125,7 @@ impl InMemoryCache {
 /// Warm up the cache with the latest transactions.
 async fn warm_up_the_cache<C>(
     conn: C,
-    cache: Cache<String, Arc<Transaction>>,
+    cache: Arc<Cache<String, Arc<Transaction>, ProtoWeighter>>,
     storage_format: StorageFormat,
 ) -> anyhow::Result<u64>
 where
@@ -139,7 +150,7 @@ where
 
 async fn create_update_task<C>(
     conn: C,
-    cache: Cache<String, Arc<Transaction>>,
+    cache: Arc<Cache<String, Arc<Transaction>, ProtoWeighter>>,
     latest_version: Arc<RwLock<u64>>,
     storage_format: StorageFormat,
     cancellation_token: tokio_util::sync::CancellationToken,
