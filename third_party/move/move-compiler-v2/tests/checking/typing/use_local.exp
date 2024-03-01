@@ -8,13 +8,16 @@ module 0x8675309::M {
     }
     private fun t() {
         {
-          let s: M::S = pack M::S(false);
+          let u: u64 = 0;
           {
-            let r: M::R = pack M::R(false);
-            0;
-            s;
-            M::R{ dummy_field: _ }: M::R = r;
-            Tuple()
+            let s: M::S = pack M::S(false);
+            {
+              let r: M::R = pack M::R(false);
+              u;
+              s;
+              M::R{ dummy_field: _ }: M::R = r;
+              Tuple()
+            }
           }
         }
     }

@@ -1,7 +1,19 @@
 // ---- Model Dump
 module 0xc0ffee::m {
     public fun test(): u64 {
-        5
+        {
+          let x: u64 = 1;
+          {
+            let x: u64 = Add<u64>(x, 1);
+            {
+              let y: u64 = 2;
+              {
+                let y: u64 = Add<u64>(y, 1);
+                Add<u64>(x, y)
+              }
+            }
+          }
+        }
     }
     spec fun $test(): u64 {
         {

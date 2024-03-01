@@ -24,8 +24,11 @@ module 0x8675309::M {
         };
         loop {
           if cond {
-            0;
-            Tuple()
+            {
+              let x: u64 = 0;
+              x;
+              Tuple()
+            }
           } else {
             break
           }

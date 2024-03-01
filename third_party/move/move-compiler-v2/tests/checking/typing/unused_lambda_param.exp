@@ -27,15 +27,33 @@ warning: Function `0xc0ffee::m::unused_lambda_suppressed2` is unused: it has no 
 // ---- Model Dump
 module 0xc0ffee::m {
     private fun unused_lambda() {
-        1;
+        {
+          let (p: u64): (u64) = Tuple(0);
+          {
+            let (x: u64): (u64) = Tuple(p);
+            1
+          }
+        };
         Tuple()
     }
     private fun unused_lambda_suppressed1() {
-        1;
+        {
+          let (p: u64): (u64) = Tuple(0);
+          {
+            let (_x: u64): (u64) = Tuple(p);
+            1
+          }
+        };
         Tuple()
     }
     private fun unused_lambda_suppressed2() {
-        1;
+        {
+          let (p: u64): (u64) = Tuple(0);
+          {
+            let (_): (u64) = Tuple(p);
+            1
+          }
+        };
         Tuple()
     }
     spec fun $test(p: u64,f: |u64|u64): u64 {

@@ -13,12 +13,18 @@ module 0x8675309::M {
         }
     }
     private fun t1() {
-        if true {
+        if {
+          let x: bool = true;
+          x
+        } {
           Tuple()
         } else {
           Tuple()
         };
-        if false {
+        if {
+          let x: bool = false;
+          x
+        } {
           Tuple()
         } else {
           Tuple()

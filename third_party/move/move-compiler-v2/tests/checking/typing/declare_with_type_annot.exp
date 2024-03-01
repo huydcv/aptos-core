@@ -31,8 +31,14 @@ module 0x8675309::M {
     }
     private fun t0() {
         {
-          let (_, _, M::R{ f: _ }): (u64, bool, M::R);
-          Tuple()
+          let (): ();
+          {
+            let x: u64;
+            {
+              let (x: u64, b: bool, M::R{ f: f: u64 }): (u64, bool, M::R);
+              Tuple()
+            }
+          }
         }
     }
     spec fun $t0() {

@@ -4,9 +4,18 @@ module 0x8675309::M {
         dummy_field: bool,
     }
     private fun t0() {
-        0;
-        Borrow(Immutable)(0);
-        Borrow(Mutable)(1);
+        {
+          let x: u64 = 0;
+          x
+        };
+        {
+          let x: u64 = 0;
+          Borrow(Immutable)(x)
+        };
+        {
+          let y: u64 = 0;
+          Borrow(Mutable)(Add<u64>(y, 1))
+        };
         M::R{ dummy_field: _ }: M::R = {
           let r: M::R = {
             let r: M::R = pack M::R(false);
@@ -14,7 +23,10 @@ module 0x8675309::M {
           };
           r
         };
-        Tuple(0, false);
+        {
+          let x: u64 = 0;
+          Tuple(x, false)
+        };
         Tuple()
     }
     spec fun $t0();
