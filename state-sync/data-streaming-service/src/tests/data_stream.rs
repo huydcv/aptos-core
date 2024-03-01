@@ -1520,10 +1520,17 @@ async fn test_continuous_stream_optimistic_fetch_timeout() {
 
 #[tokio::test]
 async fn test_continuous_stream_subscription_failures() {
+    // Create a dynamic prefetching config with prefetching disabled
+    let dynamic_prefetching = DynamicPrefetchingConfig {
+        enable_dynamic_prefetching: false,
+        ..Default::default()
+    };
+
     // Create a test streaming service config with subscriptions enabled
     let max_request_retry = 3;
     let max_concurrent_requests = 3;
     let streaming_service_config = DataStreamingServiceConfig {
+        dynamic_prefetching,
         enable_subscription_streaming: true,
         max_concurrent_requests,
         max_request_retry,
@@ -1652,10 +1659,17 @@ async fn test_continuous_stream_subscription_failures() {
 
 #[tokio::test]
 async fn test_continuous_stream_subscription_lag() {
+    // Create a dynamic prefetching config with prefetching disabled
+    let dynamic_prefetching = DynamicPrefetchingConfig {
+        enable_dynamic_prefetching: false,
+        ..Default::default()
+    };
+
     // Create a test streaming service config with subscriptions enabled
     let max_concurrent_requests = 3;
     let max_subscription_stream_lag_secs = 10;
     let streaming_service_config = DataStreamingServiceConfig {
+        dynamic_prefetching,
         enable_subscription_streaming: true,
         max_subscription_stream_lag_secs,
         max_concurrent_requests,
@@ -1910,10 +1924,17 @@ async fn test_continuous_stream_subscription_lag_bounded() {
 
 #[tokio::test]
 async fn test_continuous_stream_subscription_lag_catch_up() {
+    // Create a dynamic prefetching config with prefetching disabled
+    let dynamic_prefetching = DynamicPrefetchingConfig {
+        enable_dynamic_prefetching: false,
+        ..Default::default()
+    };
+
     // Create a test streaming service config with subscriptions enabled
     let max_concurrent_requests = 3;
     let max_subscription_stream_lag_secs = 10;
     let streaming_service_config = DataStreamingServiceConfig {
+        dynamic_prefetching,
         enable_subscription_streaming: true,
         max_subscription_stream_lag_secs,
         max_concurrent_requests,
@@ -2024,6 +2045,243 @@ async fn test_continuous_stream_subscription_lag_catch_up() {
 }
 
 #[tokio::test]
+async fn test_continuous_stream_subscription_lag_catch_up_prefetching() {
+    // Create a dynamic prefetching config with prefetching enabled
+    let max_in_flight_subscription_requests = 5;
+    let dynamic_prefetching = DynamicPrefetchingConfig {
+        enable_dynamic_prefetching: true,
+        max_in_flight_subscription_requests,
+        ..Default::default()
+    };
+
+    // Create a test streaming service config with subscriptions enabled
+    let max_subscription_stream_lag_secs = 10;
+    let streaming_service_config = DataStreamingServiceConfig {
+        dynamic_prefetching,
+        enable_subscription_streaming: true,
+        max_subscription_stream_lag_secs,
+        ..Default::default()
+    };
+
+    // Test all types of continuous data streams
+    let continuous_data_streams = enumerate_continuous_data_streams(
+        AptosDataClientConfig::default(),
+        streaming_service_config,
+    );
+    for (
+        mut data_stream,
+        mut stream_listener,
+        time_service,
+        transactions_only,
+        allow_transactions_or_outputs,
+    ) in continuous_data_streams
+    {
+        // Initialize the data stream
+        let mut global_data_summary = create_global_data_summary(1);
+        initialize_data_requests(&mut data_stream, &global_data_summary);
+
+        // Fetch the subscription stream ID from the first pending request
+        let subscription_stream_id = get_subscription_stream_id(&mut data_stream, 0);
+
+        // Update the global data summary to be ahead of the subscription stream
+        let highest_advertised_version = MAX_ADVERTISED_TRANSACTION + 1000;
+        global_data_summary.advertised_data.synced_ledger_infos = vec![create_ledger_info(
+            highest_advertised_version,
+            MAX_ADVERTISED_EPOCH_END,
+            false,
+        )];
+
+        // Set a valid response for the first subscription request and process it
+        let highest_response_version = highest_advertised_version - 500; // Behind the advertised version
+        set_new_data_response_in_queue(
+            &mut data_stream,
+            0,
+            highest_response_version,
+            transactions_only,
+        );
+        process_data_responses(&mut data_stream, &global_data_summary).await;
+        assert_some!(stream_listener.select_next_some().now_or_never());
+
+        // Verify the stream is now tracking the subscription lag
+        let subscription_stream_lag = data_stream.get_subscription_stream_lag().unwrap();
+        assert_eq!(subscription_stream_lag.start_time, time_service.now());
+        assert_eq!(
+            subscription_stream_lag.version_lag,
+            highest_advertised_version - highest_response_version
+        );
+
+        // Elapse enough time for the stream to be killed
+        let time_service = time_service.into_mock();
+        time_service.advance_secs(max_subscription_stream_lag_secs);
+
+        // Update the global data summary to be further ahead (by 1)
+        let highest_advertised_version = highest_advertised_version + 1;
+        global_data_summary.advertised_data.synced_ledger_infos = vec![create_ledger_info(
+            highest_advertised_version,
+            MAX_ADVERTISED_EPOCH_END,
+            false,
+        )];
+
+        // Set a valid response for the first subscription request and process it
+        let highest_response_version = highest_response_version + 1; // Still behind, but not worse
+        set_new_data_response_in_queue(
+            &mut data_stream,
+            0,
+            highest_response_version,
+            transactions_only,
+        );
+        process_data_responses(&mut data_stream, &global_data_summary).await;
+        assert_some!(stream_listener.select_next_some().now_or_never());
+
+        // Verify that we still have pending subscription requests (the stream hasn't fallen further behind)
+        verify_pending_subscription_requests(
+            &mut data_stream,
+            max_in_flight_subscription_requests,
+            allow_transactions_or_outputs,
+            transactions_only,
+            2,
+            subscription_stream_id,
+            0,
+        );
+
+        // Verify the state of the subscription stream lag
+        let subscription_stream_lag = data_stream.get_subscription_stream_lag().unwrap();
+        assert_eq!(
+            subscription_stream_lag.version_lag,
+            highest_advertised_version - highest_response_version
+        );
+
+        // Set a valid response for the first subscription request and process it
+        set_new_data_response_in_queue(
+            &mut data_stream,
+            0,
+            highest_advertised_version, // Catch the stream up to the advertised version
+            transactions_only,
+        );
+        process_data_responses(&mut data_stream, &global_data_summary).await;
+        assert_some!(stream_listener.select_next_some().now_or_never());
+
+        // Verify that the subscription stream lag has now been reset (the stream caught up)
+        assert!(data_stream.get_subscription_stream_lag().is_none());
+    }
+}
+
+#[tokio::test]
+async fn test_continuous_stream_subscription_lag_prefetching() {
+    // Create a dynamic prefetching config with prefetching enabled
+    let max_in_flight_subscription_requests = 5;
+    let dynamic_prefetching = DynamicPrefetchingConfig {
+        enable_dynamic_prefetching: true,
+        max_in_flight_subscription_requests,
+        ..Default::default()
+    };
+
+    // Create a test streaming service config with subscriptions enabled
+    let max_subscription_stream_lag_secs = 10;
+    let streaming_service_config = DataStreamingServiceConfig {
+        dynamic_prefetching,
+        enable_subscription_streaming: true,
+        max_subscription_stream_lag_secs,
+        ..Default::default()
+    };
+
+    // Test all types of continuous data streams
+    let continuous_data_streams = enumerate_continuous_data_streams(
+        AptosDataClientConfig::default(),
+        streaming_service_config,
+    );
+    for (
+        mut data_stream,
+        mut stream_listener,
+        time_service,
+        transactions_only,
+        allow_transactions_or_outputs,
+    ) in continuous_data_streams
+    {
+        // Initialize the data stream
+        let mut global_data_summary = create_global_data_summary(1);
+        initialize_data_requests(&mut data_stream, &global_data_summary);
+
+        // Fetch the subscription stream ID from the first pending request
+        let subscription_stream_id = get_subscription_stream_id(&mut data_stream, 0);
+
+        // Verify the pending subscription requests
+        verify_pending_subscription_requests(
+            &mut data_stream,
+            max_in_flight_subscription_requests,
+            allow_transactions_or_outputs,
+            transactions_only,
+            0,
+            subscription_stream_id,
+            0,
+        );
+
+        // Update the global data summary to be ahead of the subscription stream
+        let highest_advertised_version = MAX_ADVERTISED_TRANSACTION + 1000;
+        global_data_summary.advertised_data.synced_ledger_infos = vec![create_ledger_info(
+            highest_advertised_version,
+            MAX_ADVERTISED_EPOCH_END,
+            false,
+        )];
+
+        // Set a valid response for the first subscription request and process it
+        let highest_response_version = highest_advertised_version - 900; // Behind the advertised version
+        set_new_data_response_in_queue(
+            &mut data_stream,
+            0,
+            highest_response_version,
+            transactions_only,
+        );
+        process_data_responses(&mut data_stream, &global_data_summary).await;
+        assert_some!(stream_listener.select_next_some().now_or_never());
+
+        // Update the global data summary to be further ahead of the subscription stream
+        let highest_advertised_version = MAX_ADVERTISED_TRANSACTION + 2000;
+        global_data_summary.advertised_data.synced_ledger_infos = vec![create_ledger_info(
+            highest_advertised_version,
+            MAX_ADVERTISED_EPOCH_END,
+            false,
+        )];
+
+        // Elapse some time (but not enough for the stream to be killed)
+        let time_service = time_service.into_mock();
+        time_service.advance_secs(max_subscription_stream_lag_secs / 2);
+
+        // Set a valid response for the first subscription request and process it
+        let highest_response_version = highest_advertised_version - 1000; // Further behind the advertised
+        set_new_data_response_in_queue(
+            &mut data_stream,
+            0,
+            highest_response_version,
+            transactions_only,
+        );
+        process_data_responses(&mut data_stream, &global_data_summary).await;
+        assert_some!(stream_listener.select_next_some().now_or_never());
+
+        // Elapse enough time for the stream to be killed
+        time_service.advance_secs(max_subscription_stream_lag_secs);
+
+        // Set a valid response for the first subscription request and process it
+        let highest_response_version = highest_advertised_version - 901; // Behind the initial lag
+        set_new_data_response_in_queue(
+            &mut data_stream,
+            0,
+            highest_response_version,
+            transactions_only,
+        );
+        process_data_responses(&mut data_stream, &global_data_summary).await;
+        assert_some!(stream_listener.select_next_some().now_or_never());
+
+        // Verify that we no longer have pending subscription requests (the stream was killed)
+        let client_request = get_pending_client_request(&mut data_stream, 0);
+        assert!(!client_request.is_subscription_request());
+
+        // Verify that the subscription stream lag has been reset
+        assert!(data_stream.get_subscription_stream_lag().is_none());
+    }
+}
+
+#[tokio::test]
 async fn test_continuous_stream_subscription_lag_time() {
     // Create a test streaming service config with subscriptions enabled
     let max_subscription_stream_lag_secs = 100;
@@ -2128,10 +2386,17 @@ async fn test_continuous_stream_subscription_lag_time() {
 
 #[tokio::test]
 async fn test_continuous_stream_subscription_max() {
+    // Create a dynamic prefetching config with prefetching disabled
+    let dynamic_prefetching = DynamicPrefetchingConfig {
+        enable_dynamic_prefetching: false,
+        ..Default::default()
+    };
+
     // Create a test streaming service config with subscriptions enabled
     let max_concurrent_requests = 3;
     let max_num_consecutive_subscriptions = 5;
     let streaming_service_config = DataStreamingServiceConfig {
+        dynamic_prefetching,
         enable_subscription_streaming: true,
         max_concurrent_requests,
         max_num_consecutive_subscriptions,

@@ -264,7 +264,7 @@ impl<T: AptosDataClientInterface + Send + Clone + 'static> DataStream<T> {
         Ok(())
     }
 
-    /// Creates and sends a batch of aptos data client requests to the network
+    /// Creates and sends a batch of data client requests to the network
     fn create_and_send_client_requests(
         &mut self,
         global_data_summary: &GlobalDataSummary,
@@ -277,23 +277,19 @@ impl<T: AptosDataClientInterface + Send + Clone + 'static> DataStream<T> {
 
         // Calculate the max number of requests that can be sent now
         let max_pending_requests = self.streaming_service_config.max_pending_requests;
-        let max_num_requests_to_send = if num_pending_requests >= max_pending_requests {
-            0 // We're already at the max number of pending requests (don't do anything)
-        } else {
-            // Otherwise, calculate the max number of requests to send based on
-            // the max concurrent requests and the number of pending request slots.
-            let remaining_concurrent_requests = self
-                .dynamic_prefetching_state
-                .get_max_concurrent_requests(&self.stream_engine)
-                .saturating_sub(num_in_flight_requests);
-            let remaining_request_slots = max_pending_requests.saturating_sub(num_pending_requests);
-            min(remaining_concurrent_requests, remaining_request_slots)
-        };
+        let max_num_requests_to_send = max_pending_requests.saturating_sub(num_pending_requests);
+
+        // Get the max number of in-flight requests from the dynamic prefetching state
+        let max_in_flight_requests = self
+            .dynamic_prefetching_state
+            .get_max_concurrent_requests(&self.stream_engine);
 
         // Send the client requests
         if max_num_requests_to_send > 0 {
             let client_requests = self.stream_engine.create_data_client_requests(
                 max_num_requests_to_send,
+                max_in_flight_requests,
+                num_in_flight_requests,
                 global_data_summary,
                 self.notification_id_generator.clone(),
             )?;
