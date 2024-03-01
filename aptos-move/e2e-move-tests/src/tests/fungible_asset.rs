@@ -3,6 +3,7 @@
 
 use crate::{assert_success, tests::common, MoveHarness};
 use aptos_types::account_address::{self, AccountAddress};
+use aptos_types::account_config::ObjectGroupResource;
 use move_core_types::language_storage::TypeTag;
 use move_core_types::{identifier::Identifier, language_storage::StructTag};
 use serde::Deserialize;
@@ -153,6 +154,7 @@ fn test_basic_fungible_token() {
     assert_eq!(alice_store, bob_store);
 }
 
+// A simple test to verify gas paying still work for prologue and epilogue.
 #[test]
 fn test_coin_to_fungible_asset_migration() {
     let mut h = MoveHarness::new();
