@@ -114,6 +114,11 @@ fn check_size_and_existence_match(
 ) -> PartialVMResult<()> {
     if exists {
         if size.get() == 0 {
+            panic!(
+                "Group tag count/size shouldn't be 0 ({:?}) for an existing group: {:?}",
+                size,
+                state_key,
+            );
             Err(
                 PartialVMError::new(StatusCode::SPECULATIVE_EXECUTION_ABORT_ERROR).with_message(
                     format!(

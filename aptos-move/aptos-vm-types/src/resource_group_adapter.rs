@@ -10,9 +10,7 @@ use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::{language_storage::StructTag, value::MoveTypeLayout, vm_status::StatusCode};
 use serde::Serialize;
 use std::{
-    cell::RefCell,
-    collections::{BTreeMap, HashMap},
-    fmt::Debug,
+    backtrace::Backtrace, cell::RefCell, collections::{BTreeMap, HashMap}, fmt::Debug
 };
 
 /// Corresponding to different gas features, methods for counting the 'size' of a
@@ -145,6 +143,18 @@ impl<'r> ResourceGroupAdapter<'r> {
                     v.is_resource_groups_split_in_change_set_capable()
                 }),
         );
+
+        println!(
+            "#### group_size_kind: {:?}, {}, {}, {}, {}, {}",
+            group_size_kind, gas_feature_version, resource_groups_split_in_vm_change_set_enabled, maybe_resource_group_view.is_some(),
+            maybe_resource_group_view.map_or(false, |v| v.is_resource_groups_split_in_change_set_capable()),
+            maybe_resource_group_view.map_or("", |v| v.get_name())
+        );
+        // if gas_feature_version == 14 && resource_groups_split_in_vm_change_set_enabled {
+        //     if group_size_kind != GroupSizeKind::AsSum {
+        //         println!("{}", Backtrace::capture());
+        //     }
+        // }
 
         Self {
             maybe_resource_group_view: maybe_resource_group_view

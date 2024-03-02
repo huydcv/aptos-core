@@ -616,6 +616,7 @@ impl FakeExecutor {
 
     pub fn execute_transaction(&self, txn: SignedTransaction) -> TransactionOutput {
         let txn_block = vec![txn];
+        println!("### Executing block");
         let mut outputs = self
             .execute_block(txn_block)
             .expect("The VM should not fail to startup");

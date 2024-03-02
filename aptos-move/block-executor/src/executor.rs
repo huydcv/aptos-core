@@ -1304,6 +1304,7 @@ where
             init_speculative_logs(signature_verified_block.len());
 
             info!("parallel execution requiring fallback");
+            println!("parallel execution requiring fallback");
         }
 
         // If we didn't run parallel or it didn't finish successfully - run sequential

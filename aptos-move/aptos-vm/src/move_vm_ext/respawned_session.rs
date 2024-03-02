@@ -86,7 +86,7 @@ impl<'r, 'l> RespawnedSession<'r, 'l> {
 
         Ok(RespawnedSessionBuilder {
             executor_view,
-            resolver_builder: |executor_view| vm.as_move_resolver(executor_view),
+            resolver_builder: |executor_view| vm.as_move_resolver_with_group_view(executor_view),
             session_builder: |resolver| Some(vm.new_session(resolver, session_id)),
             storage_refund,
         }
@@ -399,6 +399,10 @@ impl<'r> TResourceGroupView for ExecutorViewWithChangeSet<'r> {
         &self,
     ) -> Option<HashMap<Self::GroupKey, BTreeMap<Self::ResourceTag, Bytes>>> {
         unreachable!("Must not be called by RespawnedSession finish");
+    }
+
+    fn is_resource_groups_split_in_change_set_capable(&self) -> bool {
+        self.base_resource_group_view.is_resource_groups_split_in_change_set_capable()
     }
 }
 

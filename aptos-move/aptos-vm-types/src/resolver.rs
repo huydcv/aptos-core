@@ -229,6 +229,9 @@ impl<T> ExecutorView for T where
 pub trait ResourceGroupView:
     TResourceGroupView<GroupKey = StateKey, ResourceTag = StructTag, Layout = MoveTypeLayout>
 {
+    fn get_name(&self) -> &'static str {
+        return std::any::type_name::<Self>();
+    }
 }
 
 impl<T> ResourceGroupView for T where
