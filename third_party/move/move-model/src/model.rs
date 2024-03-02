@@ -3899,6 +3899,10 @@ impl<'env> FunctionEnv<'env> {
         self.data.type_params.clone()
     }
 
+    pub fn get_type_parameters_ref(&self) -> &[TypeParameter] {
+        &self.data.type_params
+    }
+
     pub fn get_parameter_count(&self) -> usize {
         self.data.params.len()
     }
@@ -3931,6 +3935,11 @@ impl<'env> FunctionEnv<'env> {
     /// Returns the regular parameters associated with this function.
     pub fn get_parameters(&self) -> Vec<Parameter> {
         self.data.params.clone()
+    }
+
+    /// Returns the regular parameters associated with this function.
+    pub fn get_parameters_ref(&self) -> &[Parameter] {
+        &self.data.params
     }
 
     /// Returns the result type of this function, which is a tuple for multiple results.
