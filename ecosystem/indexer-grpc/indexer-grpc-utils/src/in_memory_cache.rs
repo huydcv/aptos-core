@@ -3,8 +3,6 @@
 use crate::compression_util::{CacheEntry, StorageFormat};
 use anyhow::Context;
 use aptos_protos::transaction::v1::Transaction;
-// use mini_moka::sync::Cache;
-// use quick_cache::{sync::Cache, Weighter};
 use dashmap::DashMap;
 use itertools::Itertools;
 use prost::Message;
@@ -142,6 +140,9 @@ where
         .await
         .context("Failed to fetch the latest version from redis")?
         .context("Latest version doesn't exist in Redis")?;
+    if latest_version == 0 {
+        return Ok((0, 0, 0));
+    }
     let versions_to_fetch: Vec<u64> =
         (latest_version.saturating_sub(WARM_UP_CACHE_ENTRIES)..latest_version).collect();
     let first_version = versions_to_fetch[0];
@@ -164,9 +165,6 @@ async fn create_update_task<C>(
 {
     tokio::spawn(async move {
         let mut conn = conn.clone();
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(
-            IN_MEMORY_CACHE_LOOKUP_RETRY_INTERVAL_MS,
-        ));
         loop {
             let current_latest_version = get_config_by_key(&mut conn, "latest_version")
                 .await
@@ -181,7 +179,7 @@ async fn create_update_task<C>(
                         tracing::info!("In-memory cache update task is cancelled.");
                         return;
                     },
-                    _ = interval.tick() => {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(IN_MEMORY_CACHE_LOOKUP_RETRY_INTERVAL_MS)) => {
                         continue;
                     },
                 }
@@ -266,7 +264,10 @@ where
             let values = conn.mget::<Vec<String>, Vec<Vec<u8>>>(keys).await?;
             // If any of the values are empty, we return an error.
             if values.iter().any(|v| v.is_empty()) {
-                return Err(anyhow::anyhow!("Failed to fetch all the keys"));
+                return Err(anyhow::anyhow!(format!(
+                    "Failed to fetch all the keys; fetch size {}",
+                    values.len()
+                )));
             }
             let transactions = values
                 .into_iter()
@@ -285,4 +286,130 @@ where
         transactions.extend(result??);
     }
     anyhow::Result::Ok(transactions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_test::{MockCmd, MockRedisConnection};
+
+    fn generate_redis_value_bulk(
+        starting_version: u64,
+        storage_format: StorageFormat,
+        size: usize,
+    ) -> redis::Value {
+        redis::Value::Bulk(
+            (starting_version..starting_version + size as u64)
+                .map(|e| {
+                    let txn = Transaction {
+                        version: e,
+                        block_height: 1,
+                        ..Default::default()
+                    };
+                    let cache_entry = CacheEntry::from_transaction(txn, storage_format);
+                    redis::Value::Data(cache_entry.into_inner())
+                })
+                .collect(),
+        )
+    }
+
+    fn generate_redis_key_bulk(
+        starting_version: u64,
+        storage_format: StorageFormat,
+        size: usize,
+    ) -> Vec<String> {
+        (starting_version..starting_version + size as u64)
+            .map(|e| CacheEntry::build_key(e, storage_format))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_cache_with_zero_entries() {
+        let mock_connection = MockRedisConnection::new(vec![MockCmd::new(
+            redis::cmd("GET").arg("latest_version"),
+            Ok(0),
+        )]);
+        let in_memory_cache = InMemoryCache::new_with_redis_connection(
+            mock_connection.clone(),
+            StorageFormat::Base64UncompressedProto,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(in_memory_cache.latest_version().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_in_memory_cache_with_one_entry() {
+        let mock_connection = MockRedisConnection::new(vec![
+            MockCmd::new(redis::cmd("GET").arg("latest_version"), Ok(1)),
+            MockCmd::new(
+                redis::cmd("MGET").arg(generate_redis_key_bulk(
+                    0,
+                    StorageFormat::Base64UncompressedProto,
+                    1,
+                )),
+                Ok(generate_redis_value_bulk(
+                    0,
+                    StorageFormat::Base64UncompressedProto,
+                    1,
+                )),
+            ),
+        ]);
+        let in_memory_cache = InMemoryCache::new_with_redis_connection(
+            mock_connection.clone(),
+            StorageFormat::Base64UncompressedProto,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(in_memory_cache.latest_version().await, 1);
+        let txns = in_memory_cache.get_transactions(0).await;
+        assert_eq!(txns.len(), 1);
+        assert_eq!(txns[0].version, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_in_memory_cache_with_2_batches() {
+        let mock_connection = MockRedisConnection::new(vec![
+            MockCmd::new(redis::cmd("GET").arg("latest_version"), Ok(1)),
+            MockCmd::new(
+                redis::cmd("MGET").arg(generate_redis_key_bulk(
+                    0,
+                    StorageFormat::Base64UncompressedProto,
+                    1,
+                )),
+                Ok(generate_redis_value_bulk(
+                    0,
+                    StorageFormat::Base64UncompressedProto,
+                    1,
+                )),
+            ),
+            MockCmd::new(redis::cmd("GET").arg("latest_version"), Ok(2)),
+            MockCmd::new(
+                redis::cmd("MGET").arg(generate_redis_key_bulk(
+                    1,
+                    StorageFormat::Base64UncompressedProto,
+                    1,
+                )),
+                Ok(generate_redis_value_bulk(
+                    1,
+                    StorageFormat::Base64UncompressedProto,
+                    1,
+                )),
+            ),
+            MockCmd::new(redis::cmd("GET").arg("latest_version"), Ok(2)),
+        ]);
+        let in_memory_cache = InMemoryCache::new_with_redis_connection(
+            mock_connection.clone(),
+            StorageFormat::Base64UncompressedProto,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        assert_eq!(in_memory_cache.latest_version().await, 2);
+        let txns = in_memory_cache.get_transactions(1).await;
+        assert_eq!(txns.len(), 1);
+        assert_eq!(txns[0].version, 1);
+    }
 }
